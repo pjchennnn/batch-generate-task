@@ -2,6 +2,22 @@
 
 由 RDLife selector 篩選符合條件的工單，找到規格文件，上傳附件並建立 Tracker AI Coding 工單。
 
+> ⚠️ **這是 Winton 內部工具**。它需要連線到內部系統（`crd.winton.com.tw` 的 RDLife / Tracker）、內部 SVN 規格庫與內部程式碼 repo，**僅供 Winton 內部、連得到內網的同仁使用**。外部使用者無法運作。
+
+## 前置需求（clone 後請先確認）
+
+| 需求 | 說明 |
+|------|------|
+| **PowerShell 7+ (pwsh)** | 所有腳本以 pwsh 執行 |
+| **TortoiseSVN** | 預設路徑 `C:\Program Files\TortoiseSVN\bin\TortoiseProc.exe`，用於更新規格庫（可用 `run -SkipSvnUpdate` 略過） |
+| **Microsoft Word** | 透過 Word COM 抽取 `.doc/.docx` 規格內文 |
+| **內網連線** | 需連得到 `crd.winton.com.tw`（RDLife / Tracker） |
+| **RDLife / Tracker 帳號** | 用 `setcred` 設定，DPAPI 加密存本機 |
+| **SVN 規格文件 checkout** | 本機一份規格庫資料夾，路徑用 `config -SpecRoot` 指定 |
+| **程式碼 repo** | 用來判斷「相關檔案」是否存在；路徑用 `config -ProjectRoot` 指定（預設 `C:\Project\agent1`） |
+
+clone 下來後，照下方「[新同事第一次設定](#新同事第一次設定四步)」設定好個人參數與帳密即可開始使用。
+
 ## 推薦入口：`ai-order.ps1`
 
 `ai-order.ps1` 是統一入口，把帳密與參數外部化（**per-user 設定 + DPAPI 加密憑證**），所以整套腳本與對應 skill **可安全分享給同事**——每個人各自設定自己的帳密與規格書路徑，互不影響、密碼不外洩。
@@ -10,7 +26,7 @@
 
 | 檔案 | 內容 |
 |------|------|
-| `config.json` | 非機密參數：工號、規格書路徑、MaxFunctionPoints、MaxCalculatedHours、aiOrderRoot |
+| `config.json` | 非機密參數：工號、規格書路徑（specRoot）、程式碼 repo 路徑（projectRoot）、MaxFunctionPoints、MaxCalculatedHours、aiOrderRoot |
 | `cred.xml` | 帳號密碼，**DPAPI 加密**（只有「該 Windows 使用者 + 該機器」能解，不進版控、不明碼） |
 | `last-run.json` | 最近一次建單的完整 JSON 結果（供查閱，不會灌進 AI context） |
 
@@ -21,7 +37,7 @@
 & "C:\Project\automatic-ai-order\ai-order.ps1" status
 
 # 2) 設定 / 重設參數（非互動，只帶要改的）
-& "C:\Project\automatic-ai-order\ai-order.ps1" config -EmployeeNo CQ1 -SpecRoot "C:\Users\xxx\Desktop\規格文件" -MaxFunctionPoints 12 -MaxCalculatedHours 4
+& "C:\Project\automatic-ai-order\ai-order.ps1" config -EmployeeNo CQ1 -SpecRoot "C:\Users\xxx\Desktop\規格文件" -ProjectRoot "C:\Project\agent1" -MaxFunctionPoints 12 -MaxCalculatedHours 4
 
 # 3) 設定帳號密碼（互動，會跳出 Windows 帳密對話框；只需一次）
 & "C:\Project\automatic-ai-order\ai-order.ps1" setcred
@@ -78,16 +94,19 @@ FULL_RESULT_FILE=C:\Users\xxx\.winton-ai-order\last-run.json
 
 `STATUS` 可能值：`ok` / `not-configured` / `no-credential` / `spec-root-missing` / `error` / `parse-error`。
 
-### 新同事第一次設定（三步）
+### 新同事第一次設定（四步）
 
 ```powershell
-# 1. 設工號與自己的規格書路徑（MaxFP/MaxCH 不帶則用預設 12 / 4）
-& "C:\Project\automatic-ai-order\ai-order.ps1" config -EmployeeNo <你的工號> -SpecRoot "<你的規格文件資料夾>"
+# 1. 設工號、自己的規格書資料夾、程式碼 repo 路徑（MaxFP/MaxCH 不帶則用預設 12 / 4）
+& "C:\Project\automatic-ai-order\ai-order.ps1" config -EmployeeNo <你的工號> -SpecRoot "<你的規格文件資料夾>" -ProjectRoot "<你的程式碼 repo>"
 
 # 2. 設帳密（會跳出 Windows 帳密對話框，DPAPI 加密儲存）
 & "C:\Project\automatic-ai-order\ai-order.ps1" setcred
 
-# 3. 建單
+# 3. 確認設定（configured / credValid 應為 true）
+& "C:\Project\automatic-ai-order\ai-order.ps1" status
+
+# 4. 建單
 & "C:\Project\automatic-ai-order\ai-order.ps1" run
 ```
 
@@ -99,10 +118,11 @@ FULL_RESULT_FILE=C:\Users\xxx\.winton-ai-order\last-run.json
 4. 查目前自己的未結 Tracker 工單，避免同一個 RDLife 工單重複建立。
 5. 對 `SpecRoot` 做 SVN Update。
 6. 使用 `Export-RDLifeSpecMht.ps1` 查 RDLife 工單內容、解析規格檔（預設取原始 `.doc/.docx`，不產 `.mht`）。
-7. 若找到相似需求對應日期，需求描述會追加「只針對該日期的部分做改動」；若找不到則保留原始需求描述。
-8. 呼叫 `UploadFile` 上傳規格文件。
-9. 以 upload response 的 `systemFileName` / `fileName` 呼叫 `ProcessTempSpecFile` 做規格預處理。
-10. 呼叫 `SaveTask` 建立 Tracker 工單（帶入 `workingBranch` / `commitBranch` / `workflowPrompt`）。
+7. 比對 RDLife「內容」與規格書內文，若找到對應日期，需求描述會追加「只針對該日期的部分做改動」；若找不到則保留原始需求描述。
+8. 若 `ProjectRoot` 下存在與**程式代號同名的資料夾**（忽略大小寫），需求描述再追加一段「## 相關檔案 / 請優先參考 `<程式代號>` 的資料夾」；找不到資料夾則不加。
+9. 呼叫 `UploadFile` 上傳規格文件。
+10. 以 upload response 的 `systemFileName` / `fileName` 呼叫 `ProcessTempSpecFile` 做規格預處理。
+11. 呼叫 `SaveTask` 建立 Tracker 工單（帶入 `workingBranch` / `commitBranch` / `workflowPrompt`）。
 
 ## 檔案
 
