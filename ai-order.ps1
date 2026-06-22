@@ -8,7 +8,6 @@ param(
     [string]$SpecRoot,
     [Nullable[double]]$MaxFunctionPoints,
     [Nullable[double]]$MaxCalculatedHours,
-    [string]$AiOrderRoot,
     [string]$ProjectRoot,
 
     [string]$TargetWorkNo,
@@ -46,6 +45,9 @@ function Read-Config {
             }
         }
     }
+    # aiOrderRoot 一律以本腳本實際位置為準（兄弟腳本必在同資料夾），
+    # 不採用存檔值，確保 clone / 搬移到任何路徑都能正確定位。
+    $defaults['aiOrderRoot'] = $PSScriptRoot
     return [pscustomobject]$defaults
 }
 
@@ -80,7 +82,6 @@ switch ($Action) {
         if ($PSBoundParameters.ContainsKey('SpecRoot'))           { $cfg.specRoot = $SpecRoot }
         if ($PSBoundParameters.ContainsKey('MaxFunctionPoints'))  { $cfg.maxFunctionPoints = [double]$MaxFunctionPoints }
         if ($PSBoundParameters.ContainsKey('MaxCalculatedHours')) { $cfg.maxCalculatedHours = [double]$MaxCalculatedHours }
-        if ($PSBoundParameters.ContainsKey('AiOrderRoot'))        { $cfg.aiOrderRoot = $AiOrderRoot }
         if ($PSBoundParameters.ContainsKey('ProjectRoot'))        { $cfg.projectRoot = $ProjectRoot }
         Write-Config $cfg
         [pscustomobject]@{
@@ -131,9 +132,8 @@ switch ($Action) {
         $cred         = Import-Clixml -LiteralPath $CredFile
         $designerId   = ([string]$cfg.employeeNo).ToLower()
         $branchSuffix = '.' + $cfg.employeeNo
-        $aiRoot       = if ($cfg.aiOrderRoot) { $cfg.aiOrderRoot } else { $PSScriptRoot }
-        $importScript = Join-Path $aiRoot 'Invoke-TrackerRdLifeTaskImport.ps1'
-        $exportScript = Join-Path $aiRoot 'Export-RDLifeSpecMht.ps1'
+        $importScript = Join-Path $PSScriptRoot 'Invoke-TrackerRdLifeTaskImport.ps1'
+        $exportScript = Join-Path $PSScriptRoot 'Export-RDLifeSpecMht.ps1'
 
         $params = @{
             Account            = $cred.UserName
