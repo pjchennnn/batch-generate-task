@@ -1,4 +1,5 @@
 work/
 rdlife-output/
+templates/
 .rdlife-auth.local
 .tracker-credential.clixml

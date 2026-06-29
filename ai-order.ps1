@@ -173,7 +173,7 @@ switch ($Action) {
         $created = @($parsed.results | Where-Object { $_.action -eq 'created' })
         Write-Output 'STATUS=ok'
         Write-Output ('COUNTS=created={0};skipped={1};failed={2}' -f $parsed.createdCount, $parsed.skippedExistingCount, $parsed.failedCount)
-        Write-Output ('CREATED_TASKS=' + (@($created | ForEach-Object { "$($_.createdTaskId):$($_.commitBranch)" }) -join ','))
+        Write-Output ('CREATED_TASKS=' + (@($created | ForEach-Object { "$($_.createdTaskId):$($_.commitBranch):$($_.progNo)" }) -join ','))
         if ($parsed.failedCount -gt 0) {
             foreach ($f in @($parsed.results | Where-Object { $_.action -eq 'failed' })) {
                 Write-Output ('FAILED_ITEM={0}|{1}' -f $f.itemNo, $f.error)

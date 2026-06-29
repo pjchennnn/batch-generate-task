@@ -1,6 +1,6 @@
 # automatic-ai-order
 
-由 RDLife selector 篩選符合條件的工單，找到規格文件，上傳附件並建立 Tracker AI Coding 工單。
+由 RDLife（winton-rdlife MCP）查詢符合條件的工單，找到規格文件，上傳附件並建立 Tracker AI Coding 工單；建單成功後回寫 RDLife 設計師備註。
 
 > ⚠️ **這是 Winton 內部工具**。它需要連線到內部系統（`crd.winton.com.tw` 的 RDLife / Tracker）、內部 SVN 規格庫與內部程式碼 repo，**僅供 Winton 內部、連得到內網的同仁使用**。外部使用者無法運作。
 
@@ -11,8 +11,11 @@
 | **PowerShell 7+ (pwsh)** | 所有腳本以 pwsh 執行 |
 | **TortoiseSVN** | 預設路徑 `C:\Program Files\TortoiseSVN\bin\TortoiseProc.exe`，用於更新規格庫（可用 `run -SkipSvnUpdate` 略過） |
 | **Microsoft Word** | 透過 Word COM 抽取 `.doc/.docx` 規格內文 |
-| **內網連線** | 需連得到 `crd.winton.com.tw`（RDLife / Tracker） |
+| **內網連線** | 需連得到 `crd.winton.com.tw`（RDLife MCP / Tracker）與 RDLife DataSnap（`rdvm-srv2012cr.winton.com.tw`） |
 | **RDLife / Tracker 帳號** | 用 `setcred` 設定，DPAPI 加密存本機 |
+| **RDLife MCP 認證** | 環境變數 `WINTON_MCP_USER_ID` / `WINTON_MCP_TOKEN`，供 winton-rdlife MCP 查工單（PS 直打 JSON-RPC，零 token） |
+| **RDLife DataSnap 認證** | 本資料夾 `.rdlife-auth.local`（Basic header）或環境變數 `RDLIFE_AUTH_HEADER`，供建單後回寫設計師備註 |
+| **UpdWorkItemNote 範本** | `UpdWorkItemNote` 的 FireDAC delta 範本，放在 `%USERPROFILE%\.winton-ai-order\templates\updworkitemnote-frame101-body.json`（per-user、不進版控；已洗去真實工單內容，僅保留結構 + 中性 PK） |
 | **SVN 規格文件 checkout** | 本機一份規格庫資料夾，路徑用 `config -SpecRoot` 指定 |
 | **程式碼 repo** | 用來判斷「相關檔案」是否存在；路徑用 `config -ProjectRoot` 指定（預設 `C:\Project\agent1`） |
 
@@ -112,9 +115,9 @@ FULL_RESULT_FILE=C:\Users\xxx\.winton-ai-order\last-run.json
 
 ## 流程（建單主邏輯）
 
-1. 登入 Tracker。
-2. 呼叫 `RdLifeWorkItemSelector` 取得 RDLife 工單。
-3. 篩選狀態為 `W04`，且（功能點 ≤ `MaxFunctionPoints` 或計算工時 ≤ `MaxCalculatedHours`）的項目。
+1. 登入 Tracker（上傳附件與建單仍走 Tracker）。
+2. 透過 winton-rdlife MCP 查 RDLife 工單（PS 直打 JSON-RPC，零 token）：batch 用 `search_rdlife_workitem`（`pgId=<工號小寫>`、`status=W04`）；指定 `-TargetWorkNo` 時用 `get_rdlife_workitem_detail` 直查單筆，查不到再 fallback Tracker `RdLifeBugItemSelector`（bug 單）。
+3. （batch）篩選狀態為 `W04`，且（功能點 ≤ `MaxFunctionPoints` 或計算工時 ≤ `MaxCalculatedHours`）的項目；指定 `-TargetWorkNo` 時跳過此 eligibility。
 4. 查目前自己的未結 Tracker 工單，避免同一個 RDLife 工單重複建立。
 5. 對 `SpecRoot` 做 SVN Update。
 6. 使用 `Export-RDLifeSpecMht.ps1` 查 RDLife 工單內容、解析規格檔（預設取原始 `.doc/.docx`，不產 `.mht`）。
@@ -123,12 +126,16 @@ FULL_RESULT_FILE=C:\Users\xxx\.winton-ai-order\last-run.json
 9. 呼叫 `UploadFile` 上傳規格文件。
 10. 以 upload response 的 `systemFileName` / `fileName` 呼叫 `ProcessTempSpecFile` 做規格預處理。
 11. 呼叫 `SaveTask` 建立 Tracker 工單（帶入 `workingBranch` / `commitBranch` / `workflowPrompt`）。
+12. 建單成功後，透過 RDLife DataSnap `UpdWorkItemNote` 回寫該工單的設計師備註為 `{taskId}待領取` + 空行 + 原備註。具冪等性：若現有備註已是該前綴則跳過（`noteStatus=skipped:already-claimed`），寫入失敗也不影響已建好的工單（`noteStatus=failed:...`）。
 
 ## 檔案
 
 - `ai-order.ps1`: **推薦入口**（status / config / setcred / run；per-user 設定 + DPAPI 憑證 + 省 token 摘要）。
 - `Invoke-AutomaticAiOrder.ps1`: 舊版包裝器（參數寫死、需自行帶 `-Credential`）。仍可用，但建議改用 `ai-order.ps1`。
-- `Invoke-TrackerRdLifeTaskImport.ps1`: Tracker 建單主流程（已參數化 `-CommitBranchSuffix`）。
+- `Invoke-TrackerRdLifeTaskImport.ps1`: Tracker 建單主流程（已參數化 `-CommitBranchSuffix`）。取單改用 winton-rdlife MCP，建單後回寫設計師備註。
+- `RdLifeMcp.ps1`: winton-rdlife MCP 的 PS 直連封裝（`Invoke-RdLifeMcpTool` / `Get-RdLifeWorkItem` / `Get-RdLifeCandidateWorkItems`；查工單，零 token）。
+- `RdLifeNote.ps1`: 建單後回寫 RDLife 設計師備註（`Set-RdLifeDesignerNote`，DataSnap `UpdWorkItemNote`，含冪等防護）。
+- `UpdWorkItemNote` 範本：`%USERPROFILE%\.winton-ai-order\templates\updworkitemnote-frame101-body.json`（per-user、不進版控；已洗白，僅保留結構與中性 PK，執行時 retarget 成目標單 PK 後送出）。
 - `Export-RDLifeSpecMht.ps1`: 查 RDLife 與解析規格檔（`.mht` 產出已由 `-ExportMht` 開關鎖住，預設不產）。
 - `query-rdlife.ps1`: RDLife DataSnap 查詢工具。
 - `work\rdlife-output`: 查詢與解析暫存輸出。

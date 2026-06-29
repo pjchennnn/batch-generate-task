@@ -56,10 +56,15 @@ if (-not $TempDir) {
     $TempDir = Join-Path $scriptRoot "work\upload-temp"
 }
 
+. (Join-Path $scriptRoot "RdLifeMcp.ps1")
+. (Join-Path $scriptRoot "RdLifeNote.ps1")
+
 $workflowPrompt = @'
 ## 工作流程
 
 **禁止git push到遠端**
+
+**以下指令不要中斷：** `Search`, `Find`, `echo`，`read`, `write`
 
 以下會使用到MCP: coding-agent
 1. 使用 fetch_task 抓下工單的內容
@@ -67,30 +72,34 @@ $workflowPrompt = @'
 3. 若有附件，則用 **download_task_files** 抓下附件
 3.1 若附件是word檔，請用 **word_to_html** 轉成 html 後，再閱讀(不要直接讀word)
 3.2 請用  **convert_html_to_utf8** 處理剛剛轉換後的 html 檔案(輸出的檔案會有後綴`-utf8`)
-3.3 請用 **minify_spec** 處理剛剛轉成 utf8 的 html 檔案(輸出的檔案會有後綴`-clean`)<br>**之後如果要讀取 word 文件，應該要讀取步驟3.3轉換後的 html** 
-5. 切到 WorkingBranch 分支
-6. git pull
-7. 直接在本地切到工作分支 {CommitBranch}
+3.3 請用 **minify_spec** 處理剛剛轉成 utf8 的 html 檔案(輸出的檔案會有後綴`-clean`)<br>**之後如果要讀取 word 文件，應該要讀取步驟3.3轉換後的 html**
+5. git fetch origin（只取得最新遠端狀態，**不要** checkout 本地的 {WorkingBranch} 分支，以免與其他 worktree 或主 repo 同時佔用同一分支而衝突）
+6. 直接從遠端切出並建立工作分支：git checkout -b {CommitBranch} origin/{WorkingBranch}（HEAD 落在 {CommitBranch}，不會 attach 到共用的 {WorkingBranch}）
+7. 確認目前已在 {CommitBranch} 分支上（git branch --show-current 應顯示 {CommitBranch}）
 8. 使用plan mode評估修改方式與步驟
 9. 開始工作
 10. 工作完成後，**請使用claude.md中的編譯指令，進行編譯**
 11. `Code Review`: 請檢查是否有滿足工單需求
 12. `Code Review`: 請查看相關的skill，是否有符合要求
 13. 若有修改，再**使用claude.md中的編譯指令，進行編譯**
-14. 編譯完成後，使用git add 針對git status中，屬於此次新增、修改、刪除的檔案 提交到本地 {CommitBranch} 分支。並且*不能*推到遠端，並且不要加入任何*tasks*底下的項目。
+14. 編譯完成後，使用 git add 針對 git status 中屬於此次新增、修改、刪除的檔案，提交到本地 {CommitBranch} 分支。並且**禁止**推到遠端，不要加入任何 tasks 目錄下的項目。
 15. **用get_time取得當下時間，計算從步驟2到現在的總耗時秒數**
-16. 分支處理完成後，使用 report_task_completed 回覆結果，**durationSeconds 參數填入步驟10計算的秒數**
+16. 分支處理完成後，使用 report_task_completed 回覆結果，**durationSeconds 參數填入步驟15計算的秒數**
 17. 工作失敗，使用 report_task_failed 回報
+18. 依時間排序，以QA一問一答的型式輸出畫面上的執行過程，包含使用者輸入的prompt及顯示的回覆/詳細操作步驟，檔名以目前執行的工單號+.claude為主，副檔名為.md的方式，寫入c:\copilot_work_result內
+19. 最後再確認agent progress內的項目是否已完成及狀態是否已更新
 
 ## 時間記錄說明
 - 在 fetch_task 成功後，記下當時的 Unix timestamp（秒）
 - 在呼叫 report_task_completed 前，用當前時間減去開始時間得到 durationSeconds
-- 將此值傳給 report_task_completed 的 durationSeconds 參數    
+- 將此值傳給 report_task_completed 的 durationSeconds 參數
 
 ## 注意事項
 **若是閱讀、異動指定範圍內的檔案、資料夾，不用提示**
-
+**有需要確認的權限，直接寫入本地設定內，避免再度詢問**
 **以下指令不要中斷：** `Search`, `Find`, `echo`
+
+**分支建立鐵則**：本地分支一律從 `origin/<發版線>` 切出（如步驟 6 的 `git checkout -b {CommitBranch} origin/{WorkingBranch}`），**禁止**用 bare `git checkout -b <發版線名>` 靠當下 HEAD 建分支——那會生出掛錯內容、無 upstream 的分支。repo 已裝 `reference-transaction` hook：若新建的分支名與某 `origin/<同名>` 衝突、但起點不是該遠端分支，會直接被擋（訊息會提示正確指令）。若確有需要可用 `ALLOW_BRANCH_FROM_HEAD=1` 一次性繞過。
 '@
 
 function Invoke-TrackerJsonPost {
@@ -483,37 +492,45 @@ if ($form.status -ne "200") {
     throw "ResourceTaskForm session check failed: $($form | ConvertTo-Json -Depth 8)"
 }
 
-$selector = Invoke-TrackerJsonPost `
-    -Path "/Wct12/Wct1250/RdLifeWorkItemSelector" `
-    -Session $session `
-    -Body @{
-        page = 1
-        perPage = $SelectorPerPage
-        total = 0
-        q = $TargetWorkNo
-        searchType = "fuzzy"
-        searchFields = @("W.WKIM002", "W.WKIM006", "PGIF004", "W.WKIM014", "W.WKIM016")
-        searchableFields = @("W.WKIM002", "W.WKIM006", "W.WKIM016")
-        sorts = @()
-        selectorModel = @{}
-        isPagable = $true
-        openerModelField = "rdLifeItemNo"
-        openerPkgClass = "TaskForm"
-        statuses = $Statuses
-        designers = @($DesignerId)
-        systemIds = @()
-        rdLifeSystemId = $null
-    }
-
-if ($selector.status -ne "200") {
-    throw "RdLifeWorkItemSelector failed: $($selector | ConvertTo-Json -Depth 8)"
-}
-
-$allItems = @($selector.data.data)
 if ($TargetWorkNo) {
-    $allItems = @($allItems | Where-Object { $_.itemNo -eq $TargetWorkNo })
+    $candidates = @()
+    $targetItem = Get-RdLifeWorkItem -ItemNo $TargetWorkNo
+    if ($targetItem) {
+        $eligible = @($targetItem)
+    } else {
+        $bugSelector = Invoke-TrackerJsonPost `
+            -Path "/Wct12/Wct1250/RdLifeBugItemSelector" `
+            -Session $session `
+            -Body @{
+                page = 1
+                perPage = $SelectorPerPage
+                total = 0
+                q = $TargetWorkNo
+                searchType = "fuzzy"
+                searchFields = @("B.BGIM002", "B.BGIM006", "PGIF004", "B.BGIM011")
+                searchableFields = @("B.BGIM002", "B.BGIM006", "B.BGIM011")
+                sorts = @()
+                selectorModel = @{}
+                isPagable = $true
+                openerModelField = "rdLifeItemNo"
+                openerModelFieldLabel = "WRDLife工單號"
+                openerPkgClass = "TaskForm"
+                statuses = @("B01", "B03")
+                designers = @($DesignerId)
+                systemIds = @()
+                rdLifeSystemId = $null
+            }
+
+        if ($bugSelector.status -ne "200") {
+            throw "RdLifeBugItemSelector failed: $($bugSelector | ConvertTo-Json -Depth 8)"
+        }
+
+        $eligible = @($bugSelector.data.data | Where-Object { $_.itemNo -eq $TargetWorkNo })
+    }
+} else {
+    $candidates = @(Get-RdLifeCandidateWorkItems -DesignerId $DesignerId)
+    $eligible = @($candidates | Where-Object { Test-IsEligibleWorkItem $_ })
 }
-$eligible = @($allItems | Where-Object { Test-IsEligibleWorkItem $_ })
 
 $existingTasks = @(Get-AllOpenTrackerTasks -Session $session)
 $existingByRdLife = Get-ExistingRdLifeMap -Tasks $existingTasks
@@ -599,7 +616,7 @@ foreach ($item in $eligible) {
             }
         }
         $workingBranch = [string]$item.patch
-        $commitBranch = $workingBranch + $CommitBranchSuffix
+        $commitBranch = ""
 
         if ($StopAfterProcessSpec) {
             $itemResult.action = "processed-spec"
@@ -647,10 +664,27 @@ foreach ($item in $eligible) {
         $itemResult.action = "created"
         $itemResult.createdTaskId = $save.data.task.taskId
         $itemResult.workingBranch = $workingBranch
-        $itemResult.commitBranch = $commitBranch
+        $itemResult.commitBranch = [string]$save.data.task.commitBranch
         $itemResult.saveStatus = $save.status
         $itemResult.processSpecStatus = (@($processedSpecs | ForEach-Object { $_.status }) -join ",")
         $itemResult.attachments = @($save.data.task.uploadFiles | ForEach-Object { $_.fileName })
+
+        if ([string]::IsNullOrWhiteSpace([string]$itemResult.createdTaskId)) {
+            $itemResult.noteStatus = "skipped-no-taskid"
+        } elseif ($item.PSObject.Properties.Name -contains "isBug" -and $item.isBug) {
+            $itemResult.noteStatus = "skipped-bug"
+        } else {
+            try {
+                $noteResult = Set-RdLifeDesignerNote -ItemNo ([string]$item.itemNo) -ClaimTaskId ([string]$itemResult.createdTaskId)
+                if ($noteResult.Skipped) {
+                    $itemResult.noteStatus = "skipped:$($noteResult.Reason)"
+                } else {
+                    $itemResult.noteStatus = "ok:$($noteResult.StatusCode)"
+                }
+            } catch {
+                $itemResult.noteStatus = "failed:$($_.Exception.Message)"
+            }
+        }
     } catch {
         $itemResult.action = "failed"
         $itemResult.error = $_.Exception.Message
@@ -660,9 +694,9 @@ foreach ($item in $eligible) {
 }
 
 [ordered]@{
-    selectorStatus = $selector.status
-    selectorTotal = $selector.data.total
-    returnedCount = $allItems.Count
+    selectorStatus = "mcp"
+    selectorTotal = $candidates.Count
+    returnedCount = $candidates.Count
     eligibleCount = $eligible.Count
     existingOpenTaskCount = $existingTasks.Count
     dryRun = [bool]$DryRun
